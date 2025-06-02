@@ -10,6 +10,7 @@ from spanet.dataset.types import Batch, Source, AssignmentTargets
 from spanet.dataset.regressions import regression_loss
 from spanet.network.jet_reconstruction.jet_reconstruction_network import JetReconstructionNetwork
 from spanet.network.utilities.divergence_losses import assignment_cross_entropy_loss, jensen_shannon_divergence
+from spanet.network.distance_correlation.distance_correlation import distance_corr
 
 
 def numpy_tensor_array(tensor_list):
@@ -199,6 +200,29 @@ class JetReconstructionTraining(JetReconstructionNetwork):
                 self.log(f"loss/classification/{key}", current_loss, sync_dist=True)
 
         return total_loss + classification_terms
+
+    # Compute the distance correlation loss
+    def add_distance_corr_loss(
+            self,
+            total_loss: List[Tensor],
+            predictions: Dict[str, Tensor],
+            aux_variables: Dict[str, Tensor]
+    ) -> List[Tensor]:
+        decorrelation_terms = []
+
+        for key in aux_variables:
+            classifier_output = predictions[key]
+            aux_variable = aux_variables[key]
+            disco_loss = distance_corr(aux_variable, classifier_output)
+
+            decorrelation_terms.append(
+                self.options.disco_loss_scale * disco_loss)
+
+            with torch.no_grad():
+                self.log(f"loss/distance_correlation/{key}",
+                         disco_loss, sync_dist=True)
+
+        return total_loss + decorrelation_terms
 
     def training_step(self, batch: Batch, batch_nb: int) -> Dict[str, Tensor]:
         # ===================================================================================================
