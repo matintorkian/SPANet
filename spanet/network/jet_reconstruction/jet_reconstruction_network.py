@@ -163,6 +163,7 @@ class JetReconstructionNetwork(JetReconstructionBase):
                 np.nan_to_num(assignment.detach().cpu().numpy(), -np.inf)
                 for assignment in self.forward(sources).assignments
             ]
+            print(extract_predictions(assignments))
 
         # Find the optimal selection of jets from the output distributions.
         return extract_predictions(assignments)

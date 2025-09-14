@@ -1,3 +1,5 @@
+from json import decoder
+from turtle import shape
 from typing import Tuple, Dict, List
 
 import numpy as np
@@ -31,6 +33,30 @@ class JetReconstructionTraining(JetReconstructionNetwork):
             particle: self.training_dataset.event_info.product_particles[particle][0]
             for particle in self.event_particle_names
         }
+
+####################### Compute invariant masses #######################
+
+    def compute_invariant_mass(self, jet_features):
+        pt = jet_features[..., 0]
+        eta = jet_features[..., 1]
+        mass = jet_features[..., 2]
+        phi = jet_features[..., 3]
+
+        px = pt * torch.cos(phi)
+        py = pt * torch.sin(phi)
+        pz = pt * torch.sinh(eta)
+        E = torch.sqrt(px**2 + py**2 + pz**2 + mass**2)
+
+        total_px = px.sum(dim=1)
+        total_py = py.sum(dim=1)
+        total_pz = pz.sum(dim=1)
+        total_E = E.sum(dim=1)
+
+        invariant_mass = torch.sqrt(
+            torch.clamp(total_E**2 - total_px**2 - total_py**2 - total_pz**2, min=0.0))
+        return invariant_mass
+
+#######################################################################################
 
     def particle_symmetric_loss(self, assignment: Tensor, detection: Tensor, target: Tensor, mask: Tensor, weight: Tensor) -> Tensor:
         assignment_loss = assignment_cross_entropy_loss(assignment, target, mask, weight, self.options.focal_gamma)
@@ -201,19 +227,24 @@ class JetReconstructionTraining(JetReconstructionNetwork):
 
         return total_loss + classification_terms
 
-    # Compute the distance correlation loss
+# Compute the distance correlation loss
     def add_distance_corr_loss(
             self,
             total_loss: List[Tensor],
             predictions: Dict[str, Tensor],
-            aux_variables: Dict[str, Tensor]
+            aux_variables: torch.Tensor
     ) -> List[Tensor]:
         decorrelation_terms = []
 
-        for key in aux_variables:
+        for key in predictions:
             classifier_output = predictions[key]
-            aux_variable = aux_variables[key]
-            disco_loss = distance_corr(aux_variable, classifier_output)
+            classifier_output = classifier_output[:, 1]
+            aux_variable = aux_variables
+            # weight = None if not self.balance_classifications else self.classification_weights[
+            #     key]
+            normedweight = torch.ones_like(aux_variable).float()
+            disco_loss = distance_corr(
+                aux_variable, classifier_output, normedweight, power=1)
 
             decorrelation_terms.append(
                 self.options.disco_loss_scale * disco_loss)
@@ -223,6 +254,8 @@ class JetReconstructionTraining(JetReconstructionNetwork):
                          disco_loss, sync_dist=True)
 
         return total_loss + decorrelation_terms
+
+    ##########################################################
 
     def training_step(self, batch: Batch, batch_nb: int) -> Dict[str, Tensor]:
         # ===================================================================================================
@@ -280,6 +313,71 @@ class JetReconstructionTraining(JetReconstructionNetwork):
 
             if torch.isinf(assignment_loss).any():
                 raise ValueError("Assignment targets contain a collision.")
+# ===================================================================================================
+
+        # The names of the target particles
+        assignement_names = list(
+            self.training_dataset.assignments.keys())    # ['T1', 'T2', 'X']
+
+        if "X" in assignement_names:
+
+            # The index of the Higgs target
+            higgs_index = assignement_names.index("X")  # 2
+            # print(higgs_index)
+            higgs_logits = outputs.assignments[higgs_index]
+            # print(higgs_logits.shape)
+            assigned_higgs_jets_indices = higgs_logits.argmax(dim=2)
+            print(assigned_higgs_jets_indices)
+
+            num_higgs_targets = self.branch_decoders[higgs_index].num_targets
+            assigned_higgs_jets_indices = assigned_higgs_jets_indices[:,
+                                                                      :num_higgs_targets]
+
+            jet_features = batch.sources[0].data[:, :, :4]
+
+            batch_size = jet_features.size(0)
+            assigned_higgs_features = torch.stack(
+                [
+                    jet_features[torch.arange(
+                        batch_size), assigned_higgs_jets_indices[:, 0]],
+                    jet_features[torch.arange(
+                        batch_size), assigned_higgs_jets_indices[:, 1]]
+                ], dim=1
+            )
+            higgs_mass = self.compute_invariant_mass(assigned_higgs_features)
+
+# ======================================================================================================
+# Assigned bjets to top and atop removed from bjets collection
+# ------------------------------------------------------------------------------------------------------
+        if "T1" and "T2" in assignement_names:
+            top_index = assignement_names.index("T1")
+            # print(top_index)
+            top_logits = outputs.assignments[top_index]
+            # print(top_logits.shape)
+
+            # assigned_top_jets = top_logits.argmax(dim=2)
+            # # print(assigned_top_jets.shape)
+            num_top_targets = self.branch_decoders[top_index].num_targets
+            assigned_top_jets_indices = assigned_top_jets[:,
+                                                          :num_top_targets]
+
+
+# ======================================================================================================
+# Take the bjets with highest btag scores
+# ------------------------------------------------------------------------------------------------------
+        jet_features_btag = batch.sources[0].data
+        btag_scores = jet_features_btag[:, :, 4]
+
+        # Get the indices of the top2 btag scores
+        top2_btag_indices = torch.topk(btag_scores, k=2, dim=1).indices
+
+        # Gather the full jet features for these top-2 jets
+        batch_size_btag = jet_features_btag.size(0)
+        top2_bjets = jet_features_btag[torch.arange(
+            batch_size_btag).unsqueeze(1), top2_btag_indices]
+
+        X_mass = self.compute_invariant_mass(top2_bjets[:, :, :4])
+
 
         # ===================================================================================================
         # Start constructing the list of all computed loss terms.
@@ -303,6 +401,11 @@ class JetReconstructionTraining(JetReconstructionNetwork):
 
         if self.options.classification_loss_scale > 0:
             total_loss = self.add_classification_loss(total_loss, outputs.classifications, batch.classification_targets)
+
+        if self.options.disco_loss_scale > 0:
+            total_loss = self.add_distance_corr_loss(
+                total_loss, outputs.classifications, X_mass)
+
 
         # ===================================================================================================
         # Combine and return the loss
