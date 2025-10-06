@@ -220,7 +220,10 @@ class JetReconstructionTraining(JetReconstructionNetwork):
                 weight=weight
             )
 
-            classification_terms.append(self.options.classification_loss_scale * current_loss)
+            # Normalize classification loss
+            normalized_loss = current_loss / current_loss.detach()
+
+            classification_terms.append(self.options.classification_loss_scale * normalized_loss)
 
             with torch.no_grad():
                 self.log(f"loss/classification/{key}", current_loss, sync_dist=True)
@@ -245,9 +248,12 @@ class JetReconstructionTraining(JetReconstructionNetwork):
             normedweight = torch.ones_like(aux_variable).float()
             disco_loss = distance_corr(
                 aux_variable, classifier_output, normedweight, power=1)
+            
+            # Normalized disco loss
+            normalized_disco = disco_loss / disco_loss.detach()
 
             decorrelation_terms.append(
-                self.options.disco_loss_scale * disco_loss)
+                self.options.disco_loss_scale * normalized_disco)
 
             with torch.no_grad():
                 self.log(f"loss/distance_correlation/{key}",
