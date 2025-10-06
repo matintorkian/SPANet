@@ -319,65 +319,76 @@ class JetReconstructionTraining(JetReconstructionNetwork):
         assignement_names = list(
             self.training_dataset.assignments.keys())    # ['T1', 'T2', 'X']
 
-        if "X" in assignement_names:
+        # if "X" in assignement_names:
 
-            # The index of the Higgs target
-            higgs_index = assignement_names.index("X")  # 2
-            # print(higgs_index)
-            higgs_logits = outputs.assignments[higgs_index]
-            # print(higgs_logits.shape)
-            assigned_higgs_jets_indices = higgs_logits.argmax(dim=2)
-            print(assigned_higgs_jets_indices)
+        #     # The index of the Higgs target
+        #     higgs_index = assignement_names.index("X")  # 2
+        #     # print(higgs_index)
+        #     higgs_logits = outputs.assignments[higgs_index]
+        #     # print(higgs_logits.shape)
+        #     assigned_higgs_jets_indices = higgs_logits.argmax(dim=2)
+        #     # print(assigned_higgs_jets_indices)
 
-            num_higgs_targets = self.branch_decoders[higgs_index].num_targets
-            assigned_higgs_jets_indices = assigned_higgs_jets_indices[:,
-                                                                      :num_higgs_targets]
+        #     num_higgs_targets = self.branch_decoders[higgs_index].num_targets
+        #     assigned_higgs_jets_indices = assigned_higgs_jets_indices[:,
+        #                                                               :num_higgs_targets]
 
-            jet_features = batch.sources[0].data[:, :, :4]
+        #     jet_features = batch.sources[0].data[:, :, :4]
 
-            batch_size = jet_features.size(0)
-            assigned_higgs_features = torch.stack(
-                [
-                    jet_features[torch.arange(
-                        batch_size), assigned_higgs_jets_indices[:, 0]],
-                    jet_features[torch.arange(
-                        batch_size), assigned_higgs_jets_indices[:, 1]]
-                ], dim=1
-            )
-            higgs_mass = self.compute_invariant_mass(assigned_higgs_features)
+        #     batch_size = jet_features.size(0)
+        #     assigned_higgs_features = torch.stack(
+        #         [
+        #             jet_features[torch.arange(
+        #                 batch_size), assigned_higgs_jets_indices[:, 0]],
+        #             jet_features[torch.arange(
+        #                 batch_size), assigned_higgs_jets_indices[:, 1]]
+        #         ], dim=1
+        #     )
+        #     higgs_mass = self.compute_invariant_mass(assigned_higgs_features)
 
 # ======================================================================================================
-# Assigned bjets to top and atop removed from bjets collection
+# Take the bjets assigned to Top and aTop, take the highest btags from the remaining
 # ------------------------------------------------------------------------------------------------------
+        jet_features = batch.sources[0].data  # [Batch, n_jets, n_features]
+        B, Njets, nfeat = jet_features.shape
+
+
         if "T1" and "T2" in assignement_names:
             top_index = assignement_names.index("T1")
-            # print(top_index)
+            atop_index = assignement_names.index("T2")
+
             top_logits = outputs.assignments[top_index]
-            # print(top_logits.shape)
+            # torch.Size([batch_size, 20])
+            atop_logits = outputs.assignments[atop_index]
 
-            # assigned_top_jets = top_logits.argmax(dim=2)
-            # # print(assigned_top_jets.shape)
-            num_top_targets = self.branch_decoders[top_index].num_targets
-            assigned_top_jets_indices = assigned_top_jets[:,
-                                                          :num_top_targets]
+            assigned_top_jets = top_logits.argmax(dim=1, keepdim=True)
+            assigned_atop_jets = atop_logits.argmax(dim=1, keepdim=True)
+            # print(assigned_top_jets.shape) # torch.Size([batch_size, 1])
 
+            # Make a mask of all true
+            mask = torch.ones((B, Njets), dtype=torch.bool,
+                              device=jet_features.device)
 
-# ======================================================================================================
-# Take the bjets with highest btag scores
-# ------------------------------------------------------------------------------------------------------
-        jet_features_btag = batch.sources[0].data
-        btag_scores = jet_features_btag[:, :, 4]
+            # Mark jets from top and atop as false
+            mask[torch.arange(B), assigned_top_jets[:, 0]] = False
+            mask[torch.arange(B), assigned_atop_jets[:, 0]] = False
 
-        # Get the indices of the top2 btag scores
-        top2_btag_indices = torch.topk(btag_scores, k=2, dim=1).indices
+            # Apply the mask to the btag score column only
+            btag_scores = jet_features[:, :, 4]  # shapet [B, Njets]
+            # Clone the btag_scores so that we do not modify the original btag_score globally
+            masked_btag_scores = btag_scores.clone()
+            # Set the btag score of False ones to -inf
+            masked_btag_scores[~mask] = float("-inf")
 
-        # Gather the full jet features for these top-2 jets
-        batch_size_btag = jet_features_btag.size(0)
-        top2_bjets = jet_features_btag[torch.arange(
-            batch_size_btag).unsqueeze(1), top2_btag_indices]
+            # Pick the 2 jets with highest btag scores among all the remaining jets
+            highest2_indices = masked_btag_scores.topk(
+                k=2, dim=1).indices  # [B, 2]
+            highest2_bjets = jet_features[torch.arange(
+                B).unsqueeze(1), highest2_indices]  # [B, 2, N_features]
 
-        X_mass = self.compute_invariant_mass(top2_bjets[:, :, :4])
-
+            # Compute invariant mass
+            X_mass = self.compute_invariant_mass(
+                highest2_bjets[:, :, :4])  # [B]
 
         # ===================================================================================================
         # Start constructing the list of all computed loss terms.

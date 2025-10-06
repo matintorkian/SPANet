@@ -236,7 +236,7 @@ class Options(Namespace):
         self.classification_loss_scale: float = 0.0
 
         # # Scalar term for disco loss term
-        # self.disco_loss_scale: float = 0.0
+        self.disco_loss_scale: float = 0.0
 
         # Automatically balance loss terms using Jacobians.
         self.balance_losses: bool = True
